@@ -5,7 +5,7 @@
             "name": "CUDA Debug",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/vectoradd",
+            "program": "${workspaceFolder}/allsumreduce",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
