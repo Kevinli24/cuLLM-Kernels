@@ -3,7 +3,18 @@
 #include <cstdlib>
 #include <iostream>
 #include <cmath>
+#include "util.h"
 
+#define CUDA_CHECK(call)                                      \
+do {                                                          \
+    cudaError_t error = (call);                               \
+    if (error != cudaSuccess) {                               \
+        std::cerr << "CUDA error at " << __FILE__ << ":"      \
+                  << __LINE__ << ": "                         \
+                  << cudaGetErrorString(error) << '\n';       \
+        std::exit(EXIT_FAILURE);                              \
+    }                                                         \
+} while (0)
 
 // Interleaved Addressing
 /* 
@@ -629,7 +640,7 @@ __host__
 int main1()
 {
     int size = 1 << 24;
-    int blocksize = 256;
+    int blocksize = 1024;
     int numblocks = (size + (2*blocksize) - 1) / (2*blocksize);
 
     float *hin = new float[size];
@@ -642,6 +653,9 @@ int main1()
 
     float *din, *dout, *dout2;
 
+    //cudaUniquePtr<float> din_buf, dout_buf, dout2;
+    //din_buf = cudaUniquePtr<float>((float*)cudaMallocFunc(size), cudaDeleteHelper(0));
+
     cudaMalloc(&din, size * sizeof(float));
     cudaMemcpy(din, hin, size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMalloc(&dout, size * sizeof(float));
@@ -649,13 +663,16 @@ int main1()
     cudaMalloc(&dout2, size * sizeof(float));
     
     // Start benchmark code
-    int iters = 100;
+    int iters = 1000;
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
     // warmup
     firstadd4<256><<<numblocks, 256, 256 * sizeof(float)>>>(din, dout, size);
+
+    //firstadd4<256><<<numblocks, 256, 256*sizeof(float)>>>(din_buf.get())
+
     firstadd4<256><<<1, 256, 256 * sizeof(float)>>>(dout, dout2, numblocks);
     cudaDeviceSynchronize();
 
@@ -889,11 +906,167 @@ int main2()
     delete[] hout;
 
     return 0;
-} 
+}
+
+#include <cuda_runtime.h>
+#include <cub/device/device_reduce.cuh>
+
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+
+#define CUDA_CHECK(call)                                      \
+do {                                                          \
+    cudaError_t error = (call);                               \
+    if (error != cudaSuccess) {                               \
+        std::cerr << "CUDA error at " << __FILE__ << ":"      \
+                  << __LINE__ << ": "                         \
+                  << cudaGetErrorString(error) << '\n';       \
+        std::exit(EXIT_FAILURE);                              \
+    }                                                         \
+} while (0)
+
+int main3()
+{
+    constexpr int size = 1 << 24;
+    constexpr int warmupIters = 1;
+    constexpr int benchmarkIters = 1000;
+
+    float* hin = new float[size];
+
+    for (int i = 0; i < size; ++i) {
+        hin[i] = static_cast<float>(i);
+    }
+
+    float* din = nullptr;
+    float* dresult = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&din, size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dresult, sizeof(float)));
+
+    CUDA_CHECK(cudaMemcpy(
+        din,
+        hin,
+        size * sizeof(float),
+        cudaMemcpyHostToDevice
+    ));
+
+    // Determine CUB's temporary-storage requirement.
+    void* dtemp = nullptr;
+    size_t tempBytes = 0;
+
+    CUDA_CHECK(cub::DeviceReduce::Sum(
+        dtemp,
+        tempBytes,
+        din,
+        dresult,
+        size
+    ));
+
+    CUDA_CHECK(cudaMalloc(&dtemp, tempBytes));
+
+    // Warmup
+    for (int i = 0; i < warmupIters; ++i) {
+        CUDA_CHECK(cub::DeviceReduce::Sum(
+            dtemp,
+            tempBytes,
+            din,
+            dresult,
+            size
+        ));
+    }
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Benchmark
+    cudaEvent_t start;
+    cudaEvent_t stop;
+
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+
+    for (int i = 0; i < benchmarkIters; ++i) {
+        CUDA_CHECK(cub::DeviceReduce::Sum(
+            dtemp,
+            tempBytes,
+            din,
+            dresult,
+            size
+        ));
+    }
+
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float totalMs = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&totalMs, start, stop));
+
+    const double averageMs =
+        static_cast<double>(totalMs) / benchmarkIters;
+
+    float gpuResult = 0.0f;
+
+    CUDA_CHECK(cudaMemcpy(
+        &gpuResult,
+        dresult,
+        sizeof(float),
+        cudaMemcpyDeviceToHost
+    ));
+
+    // Sum of 0 + 1 + ... + (size - 1)
+    const double expected =
+        static_cast<double>(size) *
+        static_cast<double>(size - 1) / 2.0;
+
+    const double seconds = averageMs / 1000.0;
+
+    // Match your convention: count only the input read.
+    const double bytes =
+        static_cast<double>(size) * sizeof(float);
+
+    const double bandwidthGBs =
+        bytes / seconds / 1.0e9;
+
+    const double elementsPerSecond =
+        static_cast<double>(size) / seconds;
+
+    const double relativeError =
+        std::abs(static_cast<double>(gpuResult) - expected) /
+        expected;
+
+    std::cout << "CUB DeviceReduce::Sum\n";
+    std::cout << "Result:               " << gpuResult << '\n';
+    std::cout << "Expected:             " << expected << '\n';
+    std::cout << "Relative error:       " << relativeError << '\n';
+    std::cout << "Temporary storage:    " << tempBytes << " bytes\n";
+    std::cout << "Average time:         " << averageMs << " ms\n";
+    std::cout << "Effective bandwidth:  " << bandwidthGBs << " GB/s\n";
+    std::cout << "Throughput:           "
+              << elementsPerSecond / 1.0e9
+              << " billion elements/s\n";
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    CUDA_CHECK(cudaFree(dtemp));
+    CUDA_CHECK(cudaFree(dresult));
+    CUDA_CHECK(cudaFree(din));
+
+    delete[] hin;
+
+    return 0;
+}
 
 int main()
 {
-    int i = main1();
-    int j = main2();
+    //main1();
+    std::cout << "\nREDUCE 6\n";
+    main1();
+    std::cout << "\nCUSTOM REDUCTION\n";
+    main2();
+    std::cout << "\nCUB REDUCTION\n";
+    main3();
     return 0;
 }
