@@ -1,4 +1,4 @@
-# cuLLM-Kernels
+# GEMM Kernels
 
 Custom CUDA GEMM kernels written to learn GPU performance optimization,
 benchmarked on an RTX 5070 Ti (Blackwell, sm_120).
