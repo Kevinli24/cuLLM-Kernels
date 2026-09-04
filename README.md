@@ -1,3 +1,35 @@
+# cuLLM-Kernels
+
+Custom CUDA GEMM kernels written to learn GPU performance optimization,
+benchmarked on an RTX 5070 Ti (Blackwell, sm_120).
+
+The kernel progression follows [Simon Boehm's sgemm worklog](https://siboehm.com/articles/22/CUDA-MMM),
+reimplemented and benchmarked on my own hardware. Analysis, tuning, and
+anything past the worklog's progression (tensor cores, fp16) is my own work.
+
+## Kernels
+| # | Kernel | Key idea |
+|---|--------|----------|
+| 1 | Naive | One thread per output element, global memory only |
+| 2 | Coalesced | Remap thread indices so consecutive threads hit consecutive memory |
+| 3 | Shared memory | Cache BLOCKSIZE×BLOCKSIZE tiles of A and B in SMEM |
+| 4 | 1D blocktiling | Each thread computes TM outputs; results held in registers |
+
+## Benchmarks
+
+fp32, CUDA 12.x, RTX 5070 Ti. Verified against cuBLAS on random inputs (rel. error < 1e-3).
+
+## Build & Run
+```bash
+nvcc -O3 -arch=sm_120 -lcublas src/04_blocktiling_1d.cu -o gemm
+./gemm 4096 4096 4096
+```
+
+## Roadmap
+- [ ] 2D blocktiling + vectorized (float4) loads
+- [ ] Tensor core path (WMMA, fp16/bf16)
+
+
 # CUDA Parallel Reduction
 
 CUDA implementations of a floating-point sum reduction, developed progressively from simple global-memory approaches to an optimized shared-memory and warp-shuffle implementation.
